@@ -77,6 +77,7 @@ function fadeToAction(name, duration = 0.3) {
   next.reset().setEffectiveTimeScale(1).setEffectiveWeight(1).fadeIn(duration).play();
   activeAction = next;
   if (clipSelectEl) clipSelectEl.value = name; // keep the dropdown in sync with the active clip
+  resolveEquipmentCollisions();               // re-check weapon overlaps for the new pose
 }
 
 // Pick a sensible default clip: prefer idle, else the first one.
@@ -131,6 +132,56 @@ function frameModel(object) {
   grid.scale.setScalar(g / 20);
 }
 
+// --- Equipment collision detection ------------------------------------------
+// KayKit-style exports parent EVERY weapon onto the hand bones at once, so the
+// character appears to hold a crossbow AND a knife (and a throwable) at the same
+// time. The weapon meshes are rigid-parented to the hand bones, so their
+// world-space AABBs (THREE.Box3) track the pose. We detect the overlap with real
+// bounding-box intersection and hide the colliding pieces, keeping a single
+// main-hand weapon. Toggle with the "Collision" button to see the raw export.
+const WEAPON_KW = /sword|crossbow|\bbow\b|knife|dagger|axe|shield|throw|staff|spear|mace|hammer|quiver|arrow|gun|wand|pistol|offhand|1h_|2h_/i;
+let equipment = [];        // candidate weapon meshes, sorted by keep-priority
+let collisionOn = true;    // auto-hide overlapping equipment via AABB test
+let singleWeapon = true;   // after the collision pass, keep only the top survivor
+let equipStatus = '';      // short readout for the stats panel
+
+// Lower rank = preferred to keep. Off-hand is kept last so the main-hand blade wins.
+function rankOf(name) {
+  if (/offhand/i.test(name)) return 50;
+  const order = [/knife|dagger|sword/i, /throw/i, /1h_/i, /crossbow|\bbow\b/i, /2h_/i];
+  const i = order.findIndex((re) => re.test(name));
+  return i < 0 ? 40 : i;
+}
+
+function classifyEquipment(model) {
+  equipment = [];
+  model.traverse((o) => { if (o.isMesh && WEAPON_KW.test(o.name)) equipment.push(o); });
+  equipment.sort((a, b) => rankOf(a.name) - rankOf(b.name));
+}
+
+// Resolve weapon overlaps using real world-space bounding boxes.
+function resolveEquipmentCollisions() {
+  if (!equipment.length) { equipStatus = ''; return; }
+  // Reset to all-visible first: AABBs are measured on real geometry, and turning
+  // collision OFF restores the original (every-weapon) export look.
+  for (const e of equipment) e.visible = true;
+  if (!collisionOn) { equipStatus = `all shown (${equipment.length})`; return; }
+
+  scene.updateMatrixWorld(true); // weapons are rigid-parented to bones → boxes follow the pose
+  const items = equipment.map((o) => ({ o, box: new THREE.Box3().setFromObject(o) }));
+  const kept = [];
+  let hidden = 0;
+  for (const it of items) {
+    if (kept.some((k) => it.box.intersectsBox(k.box))) { it.o.visible = false; hidden++; }
+    else kept.push(it);
+  }
+  // "Keep only one weapon": hide every survivor except the top-ranked one.
+  if (singleWeapon) for (let i = 1; i < kept.length; i++) { kept[i].o.visible = false; hidden++; }
+
+  const shown = equipment.filter((e) => e.visible).map((e) => e.name);
+  equipStatus = `${shown.join(', ') || 'none'} (−${hidden})`;
+}
+
 // --- Load -------------------------------------------------------------------
 const loader = new GLTFLoader();
 // Support Draco-compressed GLBs (our export stage can enable Draco).
@@ -164,6 +215,9 @@ loader.load(
     } else {
       buildClipUI([]);
     }
+    // Detect & resolve the "holding every weapon at once" overlap.
+    classifyEquipment(model);
+    resolveEquipmentCollisions();
     statusEl.classList.add('hidden');
   },
   (xhr) => {
@@ -228,6 +282,15 @@ btnPlay.addEventListener('click', () => {
   btnPlay.classList.toggle('active', !paused);
 });
 
+// Collision toggle: on → auto-hide overlapping weapons (keep one); off → raw export.
+const btnCollision = document.getElementById('btnCollision');
+btnCollision.classList.toggle('active', collisionOn);
+btnCollision.addEventListener('click', () => {
+  collisionOn = !collisionOn;
+  btnCollision.classList.toggle('active', collisionOn);
+  resolveEquipmentCollisions();
+});
+
 speedEl.addEventListener('input', () => {
   playSpeed = parseFloat(speedEl.value);
   speedValEl.textContent = `${playSpeed.toFixed(2)}×`;
@@ -240,7 +303,8 @@ function updateStats() {
   statsEl.innerHTML =
     `clip: <b>${clip}</b>\n` +
     `tris: <b>${info.triangles.toLocaleString()}</b>\n` +
-    `draw calls: <b>${info.calls}</b>`;
+    `draw calls: <b>${info.calls}</b>` +
+    (equipStatus ? `\nweapon: <b>${equipStatus}</b>` : '');
 }
 
 // --- Loop / resize ----------------------------------------------------------
