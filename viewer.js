@@ -153,9 +153,22 @@ function rankOf(name) {
   return i < 0 ? 40 : i;
 }
 
+// A weapon mesh is a rigid (non-skinned) mesh rigged under a hand/weapon slot
+// bone. Detect by the bone ancestor first (name-agnostic, robust), then fall
+// back to weapon keywords so this also works on other rigs.
+function hasWeaponSlotAncestor(o) {
+  for (let p = o.parent; p; p = p.parent) {
+    if (p.isBone && /handslot|weaponslot|\bslot\b/i.test(p.name)) return true;
+  }
+  return false;
+}
+
 function classifyEquipment(model) {
   equipment = [];
-  model.traverse((o) => { if (o.isMesh && WEAPON_KW.test(o.name)) equipment.push(o); });
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    if ((!o.isSkinnedMesh && hasWeaponSlotAncestor(o)) || WEAPON_KW.test(o.name)) equipment.push(o);
+  });
   equipment.sort((a, b) => rankOf(a.name) - rankOf(b.name));
 }
 
@@ -308,10 +321,15 @@ function updateStats() {
 }
 
 // --- Loop / resize ----------------------------------------------------------
+let equipTick = 0;
 function animate() {
   const dt = clock.getDelta();
   if (mixer && !paused) mixer.update(dt * playSpeed);
   controls.update();
+  // Re-resolve weapon overlaps a few times a second so any animated pose is
+  // covered (cheap: a handful of AABBs). Runs after mixer.update so boxes match
+  // the current frame's pose.
+  if (equipment.length && (equipTick++ % 6 === 0)) resolveEquipmentCollisions();
   renderer.render(scene, camera);
   updateStats();
 }
