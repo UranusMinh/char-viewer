@@ -33,13 +33,19 @@
       display: flex; flex-direction: column; gap: 10px;
       background: #1c2128ee; border: 1px solid #2c333d; border-radius: 10px; padding: 10px; }
     #panelBody.collapsed { display: none; }
-    #panelBody .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    #panelBody .row { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
     #panelBody .row > label { font-size: 12px; color: #9aa4b2; min-width: 42px; }
-    #panelBody .row.toggles { gap: 6px; }
+    #panelBody .row.toggles { gap: 6px; flex-wrap: wrap; }
     #panelBody .row.toggles .ctl-btn { flex: 1 1 calc(50% - 6px); text-align: center; }
-    #clipSelect { pointer-events: auto; flex: 1; cursor: pointer; color: #cdd3dc;
-      background: #14171c; border: 1px solid #2c333d; border-radius: 8px; padding: 6px 8px;
-      font-size: 13px; }
+    /* Clip dropdown — strip native chrome and draw our own caret so it clearly reads as a dropdown */
+    #clipSelect { pointer-events: auto; flex: 1; min-width: 0; cursor: pointer; color: #cdd3dc;
+      background-color: #14171c; border: 1px solid #2c333d; border-radius: 8px;
+      padding: 6px 30px 6px 10px; font-size: 13px;
+      -webkit-appearance: none; -moz-appearance: none; appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4.5l4 4 4-4' fill='none' stroke='%239aa4b2' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      background-repeat: no-repeat; background-position: right 10px center; background-size: 12px; }
+    #clipSelect:hover { border-color: #3a4150; }
+    #clipSelect:focus { outline: none; border-color: #2f6feb; }
     #speed { pointer-events: auto; flex: 1; min-width: 90px; accent-color: #2f6feb; }
     #speedVal { font-size: 12px; color: #e6e9ef; min-width: 38px; text-align: right;
       font-variant-numeric: tabular-nums; }
