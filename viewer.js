@@ -141,9 +141,17 @@ function frameModel(object) {
 // main-hand weapon. Toggle with the "Collision" button to see the raw export.
 const WEAPON_KW = /sword|crossbow|\bbow\b|knife|dagger|axe|shield|throw|staff|spear|mace|hammer|quiver|arrow|gun|wand|pistol|offhand|1h_|2h_/i;
 let equipment = [];        // candidate weapon meshes, sorted by keep-priority
-let collisionOn = true;    // auto-hide overlapping equipment via AABB test
+let collisionOn = true;    // auto-hide overlapping equipment + push weapon out of head
 let singleWeapon = true;   // after the collision pass, keep only the top survivor
 let equipStatus = '';      // short readout for the stats panel
+
+// Head collider (for the weapon-vs-head push-out). Sphere tracked by the head bone.
+let headBone = null;
+const headLocalCenter = new THREE.Vector3();
+let headRadius = 0;
+const HEAD_PUSH_CAP = 0.4; // max metres we may shift a blade out of the skull
+const HEAD_PUSH_ITERS = 5;
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _hc = new THREE.Vector3();
 
 // Lower rank = preferred to keep. Off-hand is kept last so the main-hand blade wins.
 function rankOf(name) {
@@ -170,14 +178,64 @@ function classifyEquipment(model) {
     if ((!o.isSkinnedMesh && hasWeaponSlotAncestor(o)) || WEAPON_KW.test(o.name)) equipment.push(o);
   });
   equipment.sort((a, b) => rankOf(a.name) - rankOf(b.name));
+  // Remember each weapon's bind-pose local position so the head push-out can be
+  // reset every frame (non-destructive), and cache its oriented local box.
+  for (const e of equipment) {
+    e.userData.bindPos = e.position.clone();
+    if (e.geometry && !e.geometry.boundingBox) e.geometry.computeBoundingBox();
+  }
 }
 
-// Resolve weapon overlaps using real world-space bounding boxes.
+// Build a head sphere for the weapon-vs-head test. Centre is the head mesh's
+// visual centre (reliable) tracked via the head bone; radius is derived from the
+// bone→centre distance (the skinned head's own bounding box is unreliable).
+function setupHeadCollider(model) {
+  headBone = null; headRadius = 0;
+  model.traverse((o) => { if (!headBone && o.isBone && /head/i.test(o.name)) headBone = o; });
+  let headMesh = null;
+  model.traverse((o) => { if (!headMesh && o.isMesh && /head/i.test(o.name)) headMesh = o; });
+  if (!headBone || !headMesh) return;
+  model.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(headMesh);
+  const center = box.getCenter(_v1);
+  const bonePos = headBone.getWorldPosition(_v2);
+  headRadius = center.distanceTo(bonePos) * 0.64;
+  headBone.worldToLocal(headLocalCenter.copy(center));
+}
+
+// Push one weapon out of the head sphere using its ORIENTED box (local-space
+// clamp) so a long diagonal blade isn't over-reported like an axis-aligned box.
+function pushWeaponOutOfHead(weapon) {
+  if (!headBone || headRadius <= 0 || !weapon.geometry || !weapon.geometry.boundingBox) return 0;
+  const kbb = weapon.geometry.boundingBox;
+  let used = 0;
+  for (let k = 0; k < HEAD_PUSH_ITERS; k++) {
+    const hc = headBone.localToWorld(_hc.copy(headLocalCenter));
+    const cpLocal = kbb.clampPoint(weapon.worldToLocal(_v1.copy(hc)), _v2);
+    const cpWorld = weapon.localToWorld(cpLocal);          // nearest point on the blade
+    const d = cpWorld.distanceTo(headBone.localToWorld(_hc.copy(headLocalCenter)));
+    if (d >= headRadius) break;
+    const step = Math.min(headRadius - d, HEAD_PUSH_CAP - used);
+    if (step <= 1e-4) break;
+    used += step;
+    const dir = _v3.copy(cpWorld).sub(headBone.localToWorld(_hc.copy(headLocalCenter)));
+    if (dir.lengthSq() < 1e-8) { weapon.getWorldPosition(dir); dir.sub(headBone.localToWorld(_hc.copy(headLocalCenter))); }
+    if (dir.lengthSq() < 1e-8) dir.set(1, 0, 0);
+    dir.normalize().multiplyScalar(step);
+    const wp = weapon.getWorldPosition(_v1).add(dir);
+    weapon.position.copy(weapon.parent.worldToLocal(wp));
+    weapon.updateMatrixWorld(true);
+  }
+  return used;
+}
+
+// Resolve weapon overlaps using real world-space bounding boxes, then lift the
+// surviving weapon out of the head if an animated pose drives it into the skull.
 function resolveEquipmentCollisions() {
   if (!equipment.length) { equipStatus = ''; return; }
-  // Reset to all-visible first: AABBs are measured on real geometry, and turning
-  // collision OFF restores the original (every-weapon) export look.
-  for (const e of equipment) e.visible = true;
+  // Reset each weapon to its bind pose: AABBs are measured on real geometry, any
+  // previous head push is undone, and turning collision OFF restores the raw export.
+  for (const e of equipment) { e.visible = true; if (e.userData.bindPos) e.position.copy(e.userData.bindPos); }
   if (!collisionOn) { equipStatus = `all shown (${equipment.length})`; return; }
 
   scene.updateMatrixWorld(true); // weapons are rigid-parented to bones → boxes follow the pose
@@ -191,8 +249,12 @@ function resolveEquipmentCollisions() {
   // "Keep only one weapon": hide every survivor except the top-ranked one.
   if (singleWeapon) for (let i = 1; i < kept.length; i++) { kept[i].o.visible = false; hidden++; }
 
+  // Weapon-vs-head: push the single visible weapon out of the head sphere.
+  const main = equipment.find((e) => e.visible);
+  const push = main ? pushWeaponOutOfHead(main) : 0;
+
   const shown = equipment.filter((e) => e.visible).map((e) => e.name);
-  equipStatus = `${shown.join(', ') || 'none'} (−${hidden})`;
+  equipStatus = `${shown.join(', ') || 'none'} (−${hidden}${push > 0.005 ? `, head −${push.toFixed(2)}m` : ''})`;
 }
 
 // --- Load -------------------------------------------------------------------
@@ -228,8 +290,10 @@ loader.load(
     } else {
       buildClipUI([]);
     }
-    // Detect & resolve the "holding every weapon at once" overlap.
+    // Detect & resolve the "holding every weapon at once" overlap, and set up the
+    // head collider so an animated blade gets pushed out of the skull.
     classifyEquipment(model);
+    setupHeadCollider(model);
     resolveEquipmentCollisions();
     statusEl.classList.add('hidden');
   },
@@ -321,15 +385,13 @@ function updateStats() {
 }
 
 // --- Loop / resize ----------------------------------------------------------
-let equipTick = 0;
 function animate() {
   const dt = clock.getDelta();
   if (mixer && !paused) mixer.update(dt * playSpeed);
   controls.update();
-  // Re-resolve weapon overlaps a few times a second so any animated pose is
-  // covered (cheap: a handful of AABBs). Runs after mixer.update so boxes match
-  // the current frame's pose.
-  if (equipment.length && (equipTick++ % 6 === 0)) resolveEquipmentCollisions();
+  // Re-resolve every frame so weapon overlaps and the head push-out track the
+  // current pose smoothly (cheap: a handful of boxes). Runs after mixer.update.
+  if (equipment.length) resolveEquipmentCollisions();
   renderer.render(scene, camera);
   updateStats();
 }
